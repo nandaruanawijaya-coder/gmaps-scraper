@@ -29,9 +29,10 @@ try:
     from utils.task_generator import TaskGenerator
 except ImportError:
     # Alternative import for different structures
-    from gmaps_scraper.config.settings import ScraperConfig
-    from gmaps_scraper.core.orchestrator import ScraperOrchestrator
-    from gmaps_scraper.utils.task_generator import TaskGenerator
+    print("can't import config and orchestrator")
+    # from gmaps_scraper.config.settings import ScraperConfig
+    # from gmaps_scraper.core.orchestrator import ScraperOrchestrator
+    # from gmaps_scraper.utils.task_generator import TaskGenerator
 
 # Page configuration
 st.set_page_config(
