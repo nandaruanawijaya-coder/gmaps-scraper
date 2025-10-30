@@ -214,7 +214,7 @@ def main():
         max_results_per_task = st.number_input(
             "Max Results per Task",
             min_value=5,
-            max_value=100,
+            max_value=500,
             value=30,
             help="Maximum places to collect per keyword-location combination"
         )
