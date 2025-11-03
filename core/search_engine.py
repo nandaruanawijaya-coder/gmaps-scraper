@@ -57,24 +57,34 @@ class MapsSearchEngine:
         time.sleep(self.config.scroll_pause_time)
         
         # Scroll to load more results
-        place_elements = self._scroll_and_collect_elements(task.max_results)
+        place_hrefs = self._scroll_and_collect_elements(task.max_results)
         
-        print(f"Found {len(place_elements)} place elements")
+        print(f"Found {len(place_hrefs)} unique place hrefs")
         
-        # Extract details from each place
-        for idx, element in enumerate(place_elements):
+        # Extract details from each place by finding fresh element for each href
+        seen_urls_this_task = set()  # Track URLs for safety
+        
+        for idx, href in enumerate(place_hrefs):
             try:
-                place = self._extract_place_details(element, task)
+                # Find FRESH element by href each time
+                place = self._extract_place_details_by_href(href, task, idx, len(place_hrefs))
                 
                 if place and self._is_valid_place(place):
+                    # Double-check for duplicate URL (shouldn't happen but safety check)
+                    if place.google_maps_link in seen_urls_this_task:
+                        print(f"  [{idx+1}/{len(place_hrefs)}] ⚠️  DUPLICATE URL: {place.name}")
+                        continue
+                    
+                    # Valid new place!
+                    seen_urls_this_task.add(place.google_maps_link)
                     places.append(place)
-                    print(f"  [{idx+1}/{len(place_elements)}] ✓ {place.name}")
+                    print(f"  [{idx+1}/{len(place_hrefs)}] ✓ {place.name}")
                 
                 # Random delay
                 time.sleep(random.uniform(self.config.min_delay, self.config.max_delay))
                 
             except Exception as e:
-                print(f"  [{idx+1}/{len(place_elements)}] Error: {e}")
+                print(f"  [{idx+1}/{len(place_hrefs)}] Error: {e}")
                 continue
         
         print(f"Collected {len(places)} places for: {task}")
@@ -118,8 +128,7 @@ class MapsSearchEngine:
         return False
     
     def _scroll_and_collect_elements(self, max_results: int) -> List:
-        """Scroll and collect place elements"""
-        place_elements = []
+        """Scroll and collect unique place HREFS (not elements) by tracking unique hrefs"""
         
         try:
             results_panel = None
@@ -136,8 +145,10 @@ class MapsSearchEngine:
             
             scroll_attempts = 0
             no_change_count = 0
+            seen_hrefs = []  # Use LIST to preserve order, not set
             
-            while len(place_elements) < max_results and scroll_attempts < self.config.max_scroll_attempts:
+            while len(seen_hrefs) < max_results and scroll_attempts < self.config.max_scroll_attempts:
+                # Get current elements
                 current_elements = []
                 for selector in ['a.hfpxzc', 'div.Nv2PK']:
                     try:
@@ -147,15 +158,29 @@ class MapsSearchEngine:
                     except:
                         continue
                 
-                if len(current_elements) > len(place_elements):
-                    place_elements = current_elements
-                    no_change_count = 0
-                else:
-                    no_change_count += 1
+                # Check each element for uniqueness
+                new_count = 0
+                for idx, elem in enumerate(current_elements):
+                    try:
+                        href = elem.get_attribute('href')
+                        if href and href not in seen_hrefs:
+                            seen_hrefs.append(href)  # Preserve order
+                            new_count += 1
+                    except:
+                        continue
                 
+                # Check if we got new unique elements
+                if new_count == 0:
+                    no_change_count += 1
+                else:
+                    no_change_count = 0
+                
+                # Stop if no new unique results after multiple scrolls
                 if no_change_count >= 3:
+                    print(f"  No new unique results after {no_change_count} scrolls")
                     break
                 
+                # Scroll down
                 self.driver.execute_script(
                     "arguments[0].scrollTop = arguments[0].scrollHeight",
                     results_panel
@@ -163,49 +188,84 @@ class MapsSearchEngine:
                 
                 time.sleep(self.config.scroll_pause_time)
                 scroll_attempts += 1
-                print(f"  Scroll {scroll_attempts}: {len(place_elements)} elements")
+                print(f"  Scroll {scroll_attempts}: {len(seen_hrefs)} unique hrefs")
+            
+            # Return list of hrefs (NOT elements!)
+            final_hrefs = seen_hrefs[:max_results]
+            print(f"  Collected {len(final_hrefs)} unique hrefs")
+            return final_hrefs
             
         except Exception as e:
             print(f"Scroll error: {e}")
-        
-        return place_elements[:max_results]
+            return []
     
-    def _extract_place_details(self, element, task: SearchTask) -> Optional[Place]:
-        """Extract place details"""
+    def _extract_place_details_by_href(self, href: str, task: SearchTask, idx: int, total: int) -> Optional[Place]:
+        """Extract place details by finding fresh element with this href and clicking it"""
         try:
-            # Get preview name
-            preview_name = None
+            # Find results panel
+            results_panel = None
+            for selector in ['div[role="feed"]', 'div.m6QErb']:
+                try:
+                    results_panel = self.driver.find_element(By.CSS_SELECTOR, selector)
+                    break
+                except:
+                    continue
+            
+            if not results_panel:
+                print(f"  [{idx+1}/{total}] ❌ Can't find results panel")
+                return None
+            
+            # Find FRESH element with this href
+            element = None
             try:
-                preview_name = element.text.split('\n')[0] if element.text else None
+                # Try to find by exact href
+                elements = results_panel.find_elements(By.CSS_SELECTOR, 'a.hfpxzc')
+                for elem in elements:
+                    try:
+                        elem_href = elem.get_attribute('href')
+                        if elem_href == href:
+                            element = elem
+                            break
+                    except:
+                        continue
+            except Exception as e:
+                print(f"  [{idx+1}/{total}] ❌ Error finding element: {e}")
+                return None
+            
+            if not element:
+                print(f"  [{idx+1}/{total}] ❌ Element not found for href")
+                return None
+            
+            # Scroll into view
+            try:
+                self.driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", element)
+                time.sleep(0.5)
             except:
                 pass
             
-            # Click element
+            # Click
             try:
                 self.driver.execute_script("arguments[0].click();", element)
-            except:
-                try:
-                    element.click()
-                except:
-                    return None
+            except Exception as e:
+                print(f"  [{idx+1}/{total}] ❌ Click failed: {e}")
+                return None
             
             # Wait for details panel
             try:
                 WebDriverWait(self.driver, 10).until(
                     EC.presence_of_element_located((By.CSS_SELECTOR, 'div.m6QErb[aria-label]'))
                 )
-            except:
+            except TimeoutException:
                 pass
             
             # Wait for content to render
             time.sleep(4)
             
-            # Extract name
+            # Extract name first to see what we actually got
             name = self._extract_text('h1.DUwDvf, h1.fontHeadlineLarge, h1')
-            if not name or name in ['Hasil', 'Results', '']:
-                name = preview_name
             
-            if not name:
+            if not name or name in ['Hasil', 'Results', '']:
+                print(f"  [{idx+1}/{total}] ❌ Could not extract name")
                 return None
             
             # Extract category
@@ -226,20 +286,9 @@ class MapsSearchEngine:
                 except:
                     pass
             
-            # DEBUG: Print raw address
-            if address:
-                print(f"    🔍 RAW ADDRESS: {address}")
-            
             subdistrict, district, city, province, zip_code = parse_address(address) if address else (None, None, None, None, None)
             
-            # DEBUG: Print parsed components
-            print(f"    📍 Subdistrict: {subdistrict or 'N/A'}")
-            print(f"    📍 District: {district or 'N/A'}")
-            print(f"    📍 City: {city or 'N/A'}")
-            print(f"    📍 Province: {province or 'N/A'}")
-            print(f"    📍 ZIP: {zip_code or 'N/A'}")
-            
-            # Get coordinates from URL
+            # Get coordinates and link from current URL (where we actually are)
             link = self.driver.current_url
             latitude, longitude = extract_coordinates_from_link(link)
             
@@ -262,148 +311,22 @@ class MapsSearchEngine:
             if not rating_text:
                 rating_text = self._extract_text('div.F7nice span[aria-hidden="true"], span.ceNzKf[aria-hidden="true"]')
             
-            # Method 3: Try aria-label on button
-            if not rating_text:
-                try:
-                    rating_button = self.driver.find_element(By.CSS_SELECTOR, 'button[aria-label*="stars"], button[aria-label*="rating"]')
-                    aria = rating_button.get_attribute('aria-label')
-                    if aria:
-                        match = re.search(r'(\d+[.,]\d+)', aria)
-                        if match:
-                            rating_text = match.group(1).replace(',', '.')
-                except:
-                    pass
-            
-            # Method 4: Look for any element with rating pattern
-            if not rating_text:
-                try:
-                    # Search all text on page for rating pattern near reviews
-                    all_text = self.driver.find_element(By.CSS_SELECTOR, 'div.m6QErb').text
-                    # Pattern: number followed by reviews/stars
-                    match = re.search(r'(\d+[.,]\d+)\s*(?:\(|stars|reviews)', all_text, re.IGNORECASE)
-                    if match:
-                        rating_text = match.group(1).replace(',', '.')
-                except:
-                    pass
-            
             rating = parse_rating(rating_text)
-            print(f"    📍 Rating text: '{rating_text}' → Parsed: {rating}")
             
-            # Extract reviews - must get from individual place details, not search results
+            # Extract reviews count
             reviews_count = None
             reviews_text = None
             
-            # Method 1: Get from rating container (most specific)
             try:
                 rating_section = self.driver.find_element(By.CSS_SELECTOR, 'div.F7nice')
-                reviews_elem = rating_section.find_element(By.CSS_SELECTOR, 'span[aria-label*="reviews"], button[aria-label*="reviews"]')
-                reviews_text = reviews_elem.get_attribute('aria-label')
-                if not reviews_text:
-                    reviews_text = reviews_elem.text
-                print(f"    🔍 Method 1 (rating section): '{reviews_text}'")
-            except Exception as e:
-                print(f"    ⚠️  Method 1 failed: {e}")
-            
-            # Method 2: Try to find review count in rating section text
-            if not reviews_text:
-                try:
-                    rating_section = self.driver.find_element(By.CSS_SELECTOR, 'div.F7nice')
-                    full_text = rating_section.text
-                    print(f"    🔍 Method 2 (section text): '{full_text}'")
-                    # Pattern: "(123)" or "(1,234)" or "(1.234)" after rating
-                    match = re.search(r'\(([0-9.,\s]+)\)', full_text)
-                    if match:
-                        reviews_text = match.group(1)
-                        print(f"    ✓ Extracted from pattern: '{reviews_text}'")
-                except Exception as e:
-                    print(f"    ⚠️  Method 2 failed: {e}")
-            
-            # Method 3: Look for any button with review count
-            if not reviews_text:
-                try:
-                    review_buttons = self.driver.find_elements(By.CSS_SELECTOR, 'button[jsaction*="reviews"], button.HHrUdb, button[aria-label*="review"]')
-                    print(f"    🔍 Method 3: Found {len(review_buttons)} review buttons")
-                    for idx, btn in enumerate(review_buttons):
-                        text = btn.text
-                        aria = btn.get_attribute('aria-label')
-                        print(f"      Button {idx}: text='{text}', aria='{aria}'")
-                        
-                        # Check aria-label first
-                        if aria and 'review' in aria.lower():
-                            match = re.search(r'([0-9.,\s]+)', aria)
-                            if match:
-                                reviews_text = match.group(1)
-                                print(f"    ✓ Got from button aria: '{reviews_text}'")
-                                break
-                        
-                        # Check button text
-                        if text and 'review' in text.lower():
-                            match = re.search(r'([0-9.,\s]+)', text)
-                            if match:
-                                reviews_text = match.group(1)
-                                print(f"    ✓ Got from button text: '{reviews_text}'")
-                                break
-                except Exception as e:
-                    print(f"    ⚠️  Method 3 failed: {e}")
-            
-            # Method 4: Search in details panel (first few lines only)
-            if not reviews_text:
-                try:
-                    details_panel = self.driver.find_element(By.CSS_SELECTOR, 'div.m6QErb[aria-label]')
-                    lines = details_panel.text.split('\n')[0:10]
-                    print(f"    🔍 Method 4: Searching in {len(lines)} lines")
-                    for idx, line in enumerate(lines):
-                        # Look for line with just rating and reviews: "4.5 (123)"
-                        match = re.search(r'(\d+[.,]\d+).*?\(([0-9.,\s]+)\)', line)
-                        if match:
-                            reviews_text = match.group(2)
-                            print(f"    ✓ Found in line {idx}: '{line}' → '{reviews_text}'")
-                            break
-                except Exception as e:
-                    print(f"    ⚠️  Method 4 failed: {e}")
-            
-            # Method 5: Look for review text/link directly
-            if not reviews_text:
-                try:
-                    # Sometimes reviews are in a link or span with specific text
-                    review_elements = self.driver.find_elements(By.XPATH, 
-                        "//*[contains(text(), 'review') or contains(text(), 'Review')]")
-                    print(f"    🔍 Method 5: Found {len(review_elements)} elements with 'review'")
-                    for idx, elem in enumerate(review_elements[:5]):  # Check first 5
-                        text = elem.text
-                        print(f"      Element {idx}: '{text}'")
-                        match = re.search(r'([0-9.,\s]+)\s*review', text, re.IGNORECASE)
-                        if match:
-                            reviews_text = match.group(1)
-                            print(f"    ✓ Got from element: '{reviews_text}'")
-                            break
-                except Exception as e:
-                    print(f"    ⚠️  Method 5 failed: {e}")
-            
-            # Method 6: Get from page source as last resort
-            if not reviews_text:
-                try:
-                    page_source = self.driver.page_source
-                    # Look for common review patterns in HTML
-                    patterns = [
-                        r'aria-label="([0-9.,\s]+)\s*reviews?"',
-                        r'"reviews?["\s:]+([0-9.,\s]+)',
-                        r'reviewCount["\s:]+([0-9.,\s]+)',
-                    ]
-                    for pattern in patterns:
-                        match = re.search(pattern, page_source, re.IGNORECASE)
-                        if match:
-                            reviews_text = match.group(1)
-                            print(f"    ✓ Found in source with pattern '{pattern}': '{reviews_text}'")
-                            break
-                except Exception as e:
-                    print(f"    ⚠️  Method 6 failed: {e}")
+                full_text = rating_section.text
+                match = re.search(r'\(([0-9.,\s]+)\)', full_text)
+                if match:
+                    reviews_text = match.group(1)
+            except:
+                pass
             
             reviews_count = parse_reviews_count(reviews_text)
-            print(f"    📍 Reviews FINAL: '{reviews_text}' → Parsed: {reviews_count}")
-            
-            if not reviews_count:
-                print(f"    ❌ WARNING: Could not extract review count!")
             
             # Extract phone
             phone = self._extract_text('button[data-item-id*="phone"]')
@@ -424,12 +347,6 @@ class MapsSearchEngine:
             
             # Extract stars
             stars = self._extract_star_distribution()
-            
-            # Debug
-            print(f"    📍 Category: {category or 'N/A'}")
-            print(f"    📍 Address: {address or 'N/A'}")
-            print(f"    📍 Coords: ({latitude}, {longitude})")
-            print(f"    📍 Phone: {phone or 'N/A'}")
             
             # Create Place
             place = Place(
@@ -461,7 +378,7 @@ class MapsSearchEngine:
             return place
             
         except Exception as e:
-            print(f"❌ Extract error: {e}")
+            print(f"  [{idx+1}/{total}] ❌ Extract error: {e}")
             return None
     
     def _extract_text(self, selector: str) -> Optional[str]:
